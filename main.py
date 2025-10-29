@@ -1,5 +1,4 @@
 # main.py
-import os
 import discord
 from discord.ext import commands
 import sqlite3
@@ -20,13 +19,10 @@ def run():
 Thread(target=run).start()
 
 # ----- Bot setup -----
-TOKEN = os.environ.get('TOKEN')
-if not TOKEN:
-    raise RuntimeError("Missing TOKEN environment variable!")
+TOKEN = "MTQzMjY3MDM3MDkyNTY0NTk0NQ.GNr1xj.g_XGGxeqiekq70ERWnq-hpWmLIbbYLSfigUWog"  # <-- Put your bot token here
 
 intents = discord.Intents.default()
 intents.message_content = True
-intents.members = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 # ----- Database -----
@@ -72,41 +68,6 @@ def is_steward():
         return True
     return commands.check(predicate)
 
-# ----- Automatic ban updater -----
-def update_automatic_bans(member: discord.Member):
-    member_id = str(member.id)
-
-    # Ensure driver exists
-    c.execute('INSERT OR IGNORE INTO drivers (user_id, name) VALUES (?, ?)', (member_id, member.name))
-
-    # Total penalty points
-    c.execute('SELECT SUM(points) FROM penalties WHERE user_id = ?', (member_id,))
-    total_points = c.fetchone()[0] or 0
-
-    # Automatic Qualifying Ban
-    c.execute('SELECT * FROM bans WHERE user_id = ? AND type = "quali"', (member_id,))
-    if total_points >= 10 and not c.fetchone():
-        c.execute('INSERT INTO bans (user_id, type, reason, timestamp) VALUES (?, "quali", ?, CURRENT_TIMESTAMP)',
-                  (member_id, "Automatic quali ban for 10+ points"))
-
-    # Automatic Race Ban
-    c.execute('SELECT * FROM bans WHERE user_id = ? AND type = "race"', (member_id,))
-    if total_points >= 15 and not c.fetchone():
-        c.execute('INSERT INTO bans (user_id, type, reason, timestamp) VALUES (?, "race", ?, CURRENT_TIMESTAMP)',
-                  (member_id, "Automatic race ban for 15+ points"))
-
-    # Remove bans if points drop below thresholds
-    c.execute('SELECT * FROM bans WHERE user_id = ? AND type = "quali"', (member_id,))
-    if total_points < 10 and c.fetchone():
-        c.execute('DELETE FROM bans WHERE user_id = ? AND type = "quali"', (member_id,))
-
-    c.execute('SELECT * FROM bans WHERE user_id = ? AND type = "race"', (member_id,))
-    if total_points < 15 and c.fetchone():
-        c.execute('DELETE FROM bans WHERE user_id = ? AND type = "race"', (member_id,))
-
-    conn.commit()
-    return total_points
-
 # ----- Events -----
 @bot.event
 async def on_ready():
@@ -135,16 +96,12 @@ async def drivers(ctx):
 @bot.command()
 @is_steward()
 async def penalty(ctx, member: discord.Member, points: int, *, reason: str = "No reason provided"):
-    # Ensure driver exists
-    c.execute('INSERT OR IGNORE INTO drivers (user_id, name) VALUES (?, ?)', (str(member.id), member.name))
-    conn.commit()
-
-    # Add penalty
     c.execute('INSERT INTO penalties (user_id, points, reason) VALUES (?, ?, ?)', (str(member.id), points, reason))
     conn.commit()
 
-    # Update automatic bans
-    total_points = update_automatic_bans(member)
+    # Calculate total points
+    c.execute('SELECT SUM(points) FROM penalties WHERE user_id = ?', (str(member.id),))
+    total_points = c.fetchone()[0] or 0
 
     embed = discord.Embed(title="Penalty Added ⚠️", color=0xff9900)
     embed.add_field(name="Driver", value=member.name, inline=True)
@@ -152,16 +109,27 @@ async def penalty(ctx, member: discord.Member, points: int, *, reason: str = "No
     embed.add_field(name="Reason", value=reason, inline=False)
     embed.add_field(name="Total Points", value=total_points, inline=True)
 
-    # Show automatic bans applied
-    bans_applied = []
-    c.execute('SELECT type FROM bans WHERE user_id = ?', (str(member.id),))
-    active_bans = [row[0] for row in c.fetchall()]
-    if "quali" in active_bans and total_points >= 10:
-        bans_applied.append("⛔ Qualifying ban applied")
-    if "race" in active_bans and total_points >= 15:
-        bans_applied.append("⛔ Race ban applied")
-    if bans_applied:
-        embed.add_field(name="Automatic Bans", value="\n".join(bans_applied), inline=False)
+    # Automatic bans
+    auto_ban_text = ""
+    # Qualifying ban at 10 points
+    if total_points >= 10 and total_points < 15:
+        c.execute('SELECT * FROM bans WHERE user_id = ? AND type = "quali"', (str(member.id),))
+        if not c.fetchone():
+            c.execute('INSERT INTO bans (user_id, type, reason) VALUES (?, "quali", ?)',
+                      (str(member.id), "Automatic quali ban for 10+ points"))
+            conn.commit()
+            auto_ban_text += "⛔ Qualifying ban applied (10+ points)\n"
+    # Race ban at 15 points
+    if total_points >= 15:
+        c.execute('SELECT * FROM bans WHERE user_id = ? AND type = "race"', (str(member.id),))
+        if not c.fetchone():
+            c.execute('INSERT INTO bans (user_id, type, reason) VALUES (?, "race", ?)',
+                      (str(member.id), "Automatic race ban for 15+ points"))
+            conn.commit()
+            auto_ban_text += "⛔ Race ban applied (15+ points)\n"
+
+    if auto_ban_text:
+        embed.add_field(name="Automatic Bans", value=auto_ban_text, inline=False)
 
     await ctx.send(embed=embed)
 
@@ -183,15 +151,8 @@ async def penalties(ctx, member: discord.Member):
 @bot.command()
 @is_steward()
 async def banrace(ctx, member: discord.Member, *, reason: str = "No reason provided"):
-    # Ensure driver exists
-    c.execute('INSERT OR IGNORE INTO drivers (user_id, name) VALUES (?, ?)', (str(member.id), member.name))
+    c.execute('INSERT INTO bans (user_id, type, reason) VALUES (?, "race", ?)', (str(member.id), reason))
     conn.commit()
-
-    # Add race ban
-    c.execute('INSERT INTO bans (user_id, type, reason, timestamp) VALUES (?, "race", ?, CURRENT_TIMESTAMP)',
-              (str(member.id), reason))
-    conn.commit()
-
     embed = discord.Embed(title="Race Ban ⛔", description=f"{member.name} has been banned from the next race.", color=0xff0000)
     embed.add_field(name="Reason", value=reason, inline=False)
     await ctx.send(embed=embed)
@@ -199,22 +160,15 @@ async def banrace(ctx, member: discord.Member, *, reason: str = "No reason provi
 @bot.command()
 @is_steward()
 async def banquali(ctx, member: discord.Member, *, reason: str = "No reason provided"):
-    # Ensure driver exists
-    c.execute('INSERT OR IGNORE INTO drivers (user_id, name) VALUES (?, ?)', (str(member.id), member.name))
+    c.execute('INSERT INTO bans (user_id, type, reason) VALUES (?, "quali", ?)', (str(member.id), reason))
     conn.commit()
-
-    # Add quali ban
-    c.execute('INSERT INTO bans (user_id, type, reason, timestamp) VALUES (?, "quali", ?, CURRENT_TIMESTAMP)',
-              (str(member.id), reason))
-    conn.commit()
-
     embed = discord.Embed(title="Qualifying Ban ⛔", description=f"{member.name} has been banned from the next qualifying.", color=0xff0000)
     embed.add_field(name="Reason", value=reason, inline=False)
     await ctx.send(embed=embed)
 
 @bot.command()
 async def bans(ctx):
-    # Remove bans older than 8 days
+    # Delete bans older than 8 days
     c.execute('SELECT id, timestamp FROM bans')
     all_bans = c.fetchall()
     now = datetime.datetime.now()
@@ -227,7 +181,7 @@ async def bans(ctx):
             c.execute('DELETE FROM bans WHERE id = ?', (ban_id,))
     conn.commit()
 
-    # Show active bans
+    # Fetch active bans
     c.execute('SELECT d.name, b.type, b.reason, b.timestamp FROM bans b JOIN drivers d ON b.user_id = d.user_id')
     entries = c.fetchall()
     if not entries:
@@ -253,7 +207,9 @@ async def removeban(ctx, member: discord.Member, ban_type: str):
 @bot.command()
 @is_steward()
 async def removepenalty(ctx, member: discord.Member, points: int, *, reason: str = "Adjustment"):
-    # Get all penalties
+    """
+    Removes penalty points from a driver.
+    """
     c.execute('SELECT id, points FROM penalties WHERE user_id = ? ORDER BY timestamp DESC', (str(member.id),))
     penalties = c.fetchall()
     if not penalties:
@@ -277,8 +233,17 @@ async def removepenalty(ctx, member: discord.Member, points: int, *, reason: str
             to_remove = 0
     conn.commit()
 
-    # Update automatic bans
-    total_points = update_automatic_bans(member)
+    # Check for automatic bans after removing points
+    c.execute('SELECT SUM(points) FROM penalties WHERE user_id = ?', (str(member.id),))
+    total_points = c.fetchone()[0] or 0
+
+    # Remove automatic bans if under thresholds
+    if total_points < 10:
+        c.execute('DELETE FROM bans WHERE user_id = ? AND type = "quali"', (str(member.id),))
+    if total_points < 15:
+        c.execute('DELETE FROM bans WHERE user_id = ? AND type = "race"', (str(member.id),))
+
+    conn.commit()
 
     embed = discord.Embed(title="Penalty Points Removed ✅", color=0x00ff00)
     embed.add_field(name="Driver", value=member.name, inline=True)
@@ -289,5 +254,4 @@ async def removepenalty(ctx, member: discord.Member, points: int, *, reason: str
 
 # ----- Run bot -----
 bot.run(TOKEN)
-
 

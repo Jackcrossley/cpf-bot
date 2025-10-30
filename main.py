@@ -1,5 +1,7 @@
 # main.py
 import os
+import sys
+sys.modules['audioop'] = __import__('fake_audioop')
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
